@@ -152,20 +152,25 @@ def TubeIdentification(num, image):
     return onenumber, image_annotated
 
 def parse_data_labels(data_labels_text):
-    """解析数据标识文本，返回每个数字的四个角点坐标"""
+    """解析数据标识文本，返回每个标注区域的信息"""
     lines = data_labels_text.strip().split('\n')
-    digit_coords = []
+    label_info = []
     
     for line in lines:
         coords = list(map(int, line.split()))
-        if len(coords) >= 9:
-            # 提取x1,y1,x2,y2,x3,y3,x4,y4 (忽略第一个数字)
+        if len(coords) >= 10:  # 至少需要10个数字：任意数字 + 数字个数 + 8个坐标
+            digit_count = coords[1]  # 第二个数字表示要检测的数字个数
+            # 提取x1,y1,x2,y2,x3,y3,x4,y4 (从第3个数字开始)
             points = []
-            for i in range(1, 9, 2):
+            for i in range(2, 10, 2):
                 points.append([coords[i], coords[i+1]])
-            digit_coords.append(np.array(points, dtype=np.float32))
+            
+            label_info.append({
+                'digit_count': digit_count,
+                'points': np.array(points, dtype=np.float32)
+            })
     
-    return digit_coords
+    return label_info
 
 def perspective_transform(image, src_points, width=100, height=150):
     """透视变换校正数字区域"""
@@ -184,6 +189,21 @@ def perspective_transform(image, src_points, width=100, height=150):
     corrected = cv2.warpPerspective(image, matrix, (width, height))
     
     return corrected
+
+def split_corrected_image(corrected_image, digit_count):
+    """将校正后的图像按数字个数从左到右分割"""
+    height, width = corrected_image.shape[:2]
+    digit_width = width // digit_count
+    
+    digit_images = []
+    for i in range(digit_count):
+        start_x = i * digit_width
+        end_x = start_x + digit_width if i < digit_count - 1 else width
+        
+        digit_image = corrected_image[:, start_x:end_x]
+        digit_images.append(digit_image)
+    
+    return digit_images
 
 def format_result(digits, data_type):
     """根据数据类型格式化识别结果"""
@@ -246,34 +266,53 @@ def seven_segment_recognition(image_path, data_labels_input, data_type):
         data_labels_text = data_labels_input
         print("使用直接提供的数据标识文本")
     
-    digit_coords = parse_data_labels(data_labels_text)
+    label_info = parse_data_labels(data_labels_text)
     
-    if not digit_coords:
+    if not label_info:
         raise ValueError("数据标识解析失败")
     
-    # 3. 识别每个数字
+    # 3. 识别每个标注区域中的数字
     results = []
     corrected_images = []
+    digit_index = 0  # 用于给每个数字编号
     
-    for i, coords in enumerate(digit_coords):
-        # 透视变换校正
-        corrected = perspective_transform(gray_image, coords)
+    for region_idx, region_info in enumerate(label_info):
+        digit_count = region_info['digit_count']
+        coords = region_info['points']
+        
+        print(f"\n=== 标注区域 {region_idx + 1}: 包含 {digit_count} 个数字 ===")
+        
+        # 透视变换校正整个区域
+        # 根据数字个数调整宽度，使每个数字有足够空间
+        region_width = digit_count * 100
+        corrected = perspective_transform(gray_image, coords, width=region_width, height=150)
         corrected_images.append(corrected)
         
-        # 识别数字（这里会打印段检测信息）并获取带标注的图像
-        digit, annotated_image = TubeIdentification(i, corrected.copy())
-        results.append(digit)
-        
-        # 保存带有段标注的校正图片（黑色框标注）
+        # 保存校正后的整个区域图片
         base_name = os.path.splitext(os.path.basename(image_path))[0]
-        corrected_path = f"/home/zyy/yyc/test_led/{base_name}_corrected_{i}_segments.png"
-        cv2.imwrite(corrected_path, annotated_image)
-        print(f"已保存带段标注的图片: {corrected_path}")
+        region_path = f"/home/zyy/yyc/test_led/{base_name}_region_{region_idx}_corrected.png"
+        cv2.imwrite(region_path, corrected)
+        print(f"已保存校正后的区域图片: {region_path}")
         
-        if digit == -1:
-            print(f"数字 {i+1}: 识别失败 (跳过)")
-        else:
-            print(f"数字 {i+1}: {digit}")
+        # 分割成单个数字并识别
+        digit_images = split_corrected_image(corrected, digit_count)
+        
+        for digit_idx, digit_image in enumerate(digit_images):
+            # 识别单个数字
+            digit, annotated_image = TubeIdentification(digit_index, digit_image.copy())
+            results.append(digit)
+            
+            # 保存带有段标注的单个数字图片
+            digit_path = f"/home/zyy/yyc/test_led/{base_name}_region_{region_idx}_digit_{digit_idx}_segments.png"
+            cv2.imwrite(digit_path, annotated_image)
+            print(f"已保存带段标注的数字图片: {digit_path}")
+            
+            if digit == -1:
+                print(f"区域 {region_idx + 1} 数字 {digit_idx + 1}: 识别失败 (跳过)")
+            else:
+                print(f"区域 {region_idx + 1} 数字 {digit_idx + 1}: {digit}")
+            
+            digit_index += 1
     
     # 4. 格式化结果
     final_result = format_result(results, data_type)
@@ -282,6 +321,7 @@ def seven_segment_recognition(image_path, data_labels_input, data_type):
     valid_digits = [d for d in results if d != -1]
     print(f"\n有效识别数字: {valid_digits}")
     print(f"跳过的数字个数: {len(results) - len(valid_digits)}")
+    print(f"总共处理了 {len(label_info)} 个标注区域，{len(results)} 个数字")
     
     return final_result, results, corrected_images
 
@@ -335,7 +375,8 @@ if __name__ == "__main__":
     # 使用示例
     print("\n=== 使用示例 ===")
     print("1. 准备jpg格式的图片")
-    print("2. 准备数据标识txt文件（每行9个数字，空格分隔）")
+    print("2. 准备数据标识txt文件，格式：任意数字 数字个数 x1 y1 x2 y2 x3 y3 x4 y4")
+    print("   例如：1 3 100 50 300 50 300 200 100 200  (表示一个包含3个数字的区域)")
     print("3. 指定数据类型：'字母'、'数字一位小数'、'数字两位小数'")
     print("4. 调用 seven_segment_recognition(image_path, data_labels_file_path, data_type)")
     print("   或 seven_segment_recognition(image_path, data_labels_text_string, data_type)")

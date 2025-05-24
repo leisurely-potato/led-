@@ -8,4 +8,5 @@ dependencies = [
     "opencv-python>=4.11.0.86",
     "pillow>=11.2.1",
     "pygame>=2.6.1",
+    "pytesseract>=0.3.13",
 ]
